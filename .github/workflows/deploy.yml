@@ -1,0 +1,72 @@
+name: Deploy OpenG2P to Dev Cluster
+
+on:
+  workflow_run:
+    workflows: ["OpenG2P Odoo Package Dockers build"]
+    types:
+      - completed
+
+jobs:
+  deploy-to-dev-cluster:
+    runs-on: ubuntu-20.04
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v2
+
+      - name: Setup ufw firewall
+        run: |
+          sudo ufw enable
+          sudo ufw allow ssh
+          sudo ufw allow 51820/udp
+          sudo ufw status        
+
+      - name: Install WireGuard
+        run: sudo apt-get install -y wireguard
+
+      - name: Configure wireguard.
+        run: |
+          echo "${{ secrets.WIREGUARD_CONFIG }}" > wg0.conf
+
+      - name: Start WireGuard
+        run: |
+          sudo chmod 600 /etc/wireguard/wg0.conf
+          sudo chmod 700 /etc/wireguard/
+          sudo chmod 644 /lib/systemd/system/wg-quick@.service
+          sudo systemctl daemon-reload
+          sudo wg-quick up wg0
+          sudo wg show wg0
+
+      - name: Install kubectl
+        run: |
+          curl -LO https://dl.k8s.io/release/v1.28.5/bin/linux/amd64/kubectl
+          chmod +x kubectl
+          mkdir -p ~/.local/bin
+          mv ./kubectl ~/.local/bin/kubectl
+          kubectl version --client
+
+      - name: Configure kubeconfigfile.
+        run: |
+          echo "${{ secrets.KUBE_CONFIG }}" > dev.config
+          chmod 400 dev.config
+          export KUBECONFIG="./dev.config"
+          kubectl config view
+          kubectl get nodes
+
+      - name: Deploy to Dev Cluster
+        run: |
+          echo "RANCHER_NAMESPACE=${{ secrets.RANCHER_NAMESPACE }}" >> $GITHUB_ENV
+
+          # Set the namespace
+          kubectl config set-context --current --namespace=${RANCHER_NAMESPACE}
+          
+          # Get the current Docker image in the deployment
+          CURRENT_IMAGE=$(kubectl get deployment/openg2p-odoo -ojsonpath='{.spec.template.spec.containers[0].image}')
+
+          # Update the deployment with the new Docker image
+          kubectl set image deployment/openg2p-odoo openg2p-container=${{ secrets.docker_hub_organisation }}/openg2p-odoo-package:${{ github.event.workflow_run.event.inputs.packageName }}
+
+          # Wait for the deployment to complete
+          kubectl rollout status deployment/openg2p-odoo
+          
+          
